@@ -443,7 +443,10 @@ class RNN(nn.Module):
                      target_upper = yU[torch.arange(num),target_label[increase_u_eps]]
                      temp = true_lower > target_upper #size num
                      print("f_c - f_j = {}".format(true_lower- target_upper))
-                increase_u_eps[increase_u_eps ] = temp
+                # 使用 clone() 和布爾索引來更新 increase_u_eps
+                new_increase_u_eps = increase_u_eps.clone()
+                new_increase_u_eps[increase_u_eps] = temp
+                increase_u_eps = new_increase_u_eps
                 
             print('Finished finding upper and lower bound')
             print('The upper bound we found is \n', u_eps)
@@ -474,17 +477,18 @@ class RNN(nn.Module):
                      true_lower = yL[torch.arange(num),true_label[search]]
                      target_upper = yU[torch.arange(num),target_label[search]]
                      temp = true_lower>target_upper
-                search_copy = search.data.clone()
+                # 使用 clone() 和布爾索引來更新 search
+                new_search = search.clone()
+                new_search[search] = temp
                 #            print('search ', search.device)
                 #            print('temp ', temp.device)
-                search[search] = temp 
                 #set all active units in search to temp
                 #original inactive units in search are still inactive
                 
-                l_eps[search] = eps[temp]
+                l_eps[new_search] = eps[temp]
                 #increase active and true_lower>target_upper units in l_eps 
                 
-                u_eps[search_copy-search] = eps[temp==0]
+                u_eps[search & (~new_search)] = eps[~temp]
                 #decrease active and true_lower<target_upper units in u_eps
                 
                 # search = (u_eps - l_eps) > acc #reset active units in search
@@ -554,7 +558,7 @@ if __name__ == '__main__':
     
     #load model
     rnn = RNN(input_size, hidden_size, output_size, time_step, activation)
-    rnn.load_state_dict(torch.load(model_file, map_location='cpu'))
+    rnn.load_state_dict(torch.load(model_file, map_location='cpu', weights_only=True))
     rnn.to(device)
     
     
@@ -578,6 +582,3 @@ if __name__ == '__main__':
     print('Have saved the complete result to' + save_dir+'certified_bound')
     print('statistics of l_eps:')
     print('(min, mean, max, std) = (%.4f, %.4f, %.4f, %.4f) ' % (l_eps.min(), l_eps.mean(), l_eps.max(), l_eps.std()))
-    
-        
-  

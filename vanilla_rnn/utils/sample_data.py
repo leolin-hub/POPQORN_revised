@@ -15,7 +15,7 @@ def sample_mnist_data(N, seq_len, device, num_labels=10,
                             ])),
                 batch_size=N, shuffle=shuffle)
             iterater = iter(data_loader)
-            x,y = iterater.next()
+            x,y = next(iterater)
         x,y = x.to(device), y.to(device)
         x = x.view(N, seq_len, -1)
         # num = N

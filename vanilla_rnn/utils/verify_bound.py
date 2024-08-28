@@ -88,17 +88,3 @@ def verifyMaximumEps(classifier, x0, eps, p,true_label, target_label,
     
 if __name__ == '__main__':
     print(0)
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    

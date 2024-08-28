@@ -103,16 +103,17 @@ def getConvenientGeneralActivationBound(l,u, activation, use_constant=False):
         return kl, bl, ku, bu
     
     idx = (l==u)
-    if idx.sum()>0:
+    if idx.any()>0: # 有更動 sum -> any
         bu[idx] = l[idx]
         bl[idx] = l[idx]
         
         ku[idx] = 1e-4
         kl[idx] = 1e-4
     
-    valid = (1-idx)
+    #valid = (1-idx.int())
+    valid = ~idx
     
-    if valid.sum()>0:
+    if valid.any()>0: # 有更動 sum -> any
         func = Activation[activation][0]
         dfunc = Activation[activation][1]
         kl_temp, bl_temp, ku_temp, bu_temp = getGeneralActivationBound(
@@ -237,10 +238,13 @@ def testGetGeneralActivationBound():
     plt.plot(x.numpy(), l_func_x.numpy(), '.')
     plt.plot(x.numpy(), u_func_x.numpy(), '.')
     
-    print((l_func_x <= func_x).min())
-    print(x[l_func_x > func_x], l_func_x[l_func_x > func_x], func_x[l_func_x > func_x])
-    print((u_func_x >= func_x).min())
-    print(x[u_func_x < func_x], u_func_x[u_func_x < func_x], func_x[u_func_x < func_x])
+    # print((l_func_x <= func_x).min())
+    # print(x[l_func_x > func_x], l_func_x[l_func_x > func_x], func_x[l_func_x > func_x])
+    # print((u_func_x >= func_x).min())
+    # print(x[u_func_x < func_x], u_func_x[u_func_x < func_x], func_x[u_func_x < func_x])
+    print((l_func_x <= func_x).all())
+    print((u_func_x >= func_x).all())
+    plt.show()
     
     
 
@@ -258,27 +262,39 @@ def get_d_UB(l,u,func,dfunc):
     
     #originally they use u as the upper bound, it may not always work  
     device = l.device
-    lb = torch.zeros(l.shape, device=device);
-    keep_search = torch.ones(l.shape, device=device).byte()
+    lb = torch.zeros(l.shape, device=device)
+    keep_search = torch.ones(l.shape, device=device, dtype=torch.bool)
+
     for i in range(max_iter):
         t = diff(d[keep_search], l[keep_search])
-        idx = (t<0) + (t.abs() > 0.01)
-        keep_search[keep_search] = (idx > 0)
-        if keep_search.sum() == 0:
+        #idx = (t<0) + (t.abs() > 0.01)
+        idx = (t < 0) | (t.abs() > 0.01)
+        t = t[idx]
+        new_keep_search = torch.zeros_like(keep_search)
+        new_keep_search[keep_search] = idx
+        keep_search = new_keep_search
+        if not keep_search.any(): # keep_search.sum() == 0 to 
             break
-        t = t[idx>0]
+        
        
-        idx = t>0
-        keep_search_copy = keep_search.data.clone()
-        keep_search_copy[keep_search_copy] = idx
-        ub[keep_search_copy] = d[keep_search_copy]
-        d[keep_search_copy] = (d[keep_search_copy] + lb[keep_search_copy]) / 2
+        # idx_pos = t>0
+        # keep_search_copy = keep_search.clone()
+        # keep_search_copy[keep_search] = idx_pos
+        # ub[keep_search_copy] = d[keep_search_copy]
+        # d[keep_search_copy] = (d[keep_search_copy] + lb[keep_search_copy]) / 2
       
-        idx = t<0
-        keep_search_copy = keep_search.data.clone()
-        keep_search_copy[keep_search_copy] = idx
-        lb[keep_search_copy] = d[keep_search_copy]
-        d[keep_search_copy] = (d[keep_search_copy] + ub[keep_search_copy]) / 2
+        # idx_neg = t<0
+        # keep_search_copy = keep_search.clone()
+        # keep_search_copy[keep_search] = idx_neg
+        # lb[keep_search_copy] = d[keep_search_copy]
+        # d[keep_search_copy] = (d[keep_search_copy] + ub[keep_search_copy]) / 2
+        idx_pos = t > 0
+        ub[keep_search] = torch.where(idx_pos, d[keep_search], ub[keep_search])
+        
+        idx_neg = t < 0
+        lb[keep_search] = torch.where(idx_neg, d[keep_search], lb[keep_search])
+        
+        d[keep_search] = (lb[keep_search] + ub[keep_search]) / 2
         
     # print('Use %d iterations' % i) 
     # print(diff(d,l))
@@ -296,7 +312,7 @@ def get_d_LB(l,u,func,dfunc):
     #l and u are tensor of any shape. Their shape should be the same
     #the first dimension of l and u is batch_dimension
     diff = lambda d,u: (func(d)-func(u))/(d-u) - dfunc(d)
-    max_iter = 1000;
+    max_iter = 1000
     # d = u/2
     # d = u
     device = l.device
@@ -308,26 +324,36 @@ def get_d_LB(l,u,func,dfunc):
     
     #originally they use u as the upper bound, it may not always work  
 
-    keep_search = torch.ones(l.shape, device=device).byte()
+    keep_search = torch.ones(l.shape, device=device, dtype=torch.bool)
     for i in range(max_iter):
         t = diff(d[keep_search], u[keep_search])
-        idx = (t<0) + (t.abs() > 0.01)
-        keep_search[keep_search] = (idx > 0)
-        if keep_search.sum() == 0:
+        idx = (t<0) | (t.abs() > 0.01)
+        t = t[idx]
+        new_keep_search = torch.zeros_like(keep_search)
+        new_keep_search[keep_search] = idx
+        keep_search = new_keep_search
+        if not keep_search.any():
             break
-        t = t[idx>0]
+        
        
-        idx = t>0
-        keep_search_copy = keep_search.data.clone()
-        keep_search_copy[keep_search_copy] = idx
-        lb[keep_search_copy] = d[keep_search_copy]
-        d[keep_search_copy] = (d[keep_search_copy] + ub[keep_search_copy]) / 2
+        # idx_pos = t>0
+        # keep_search_copy = keep_search.clone()
+        # keep_search_copy[keep_search] = idx_pos
+        # lb[keep_search_copy] = d[keep_search_copy]
+        # d[keep_search_copy] = (d[keep_search_copy] + ub[keep_search_copy]) / 2
       
-        idx = t<0
-        keep_search_copy = keep_search.data.clone()
-        keep_search_copy[keep_search_copy] = idx
-        ub[keep_search_copy] = d[keep_search_copy]
-        d[keep_search_copy] = (d[keep_search_copy] + lb[keep_search_copy]) / 2
+        # idx_neg = t<0
+        # keep_search_copy = keep_search.data.clone()
+        # keep_search_copy[keep_search] = idx_neg
+        # ub[keep_search_copy] = d[keep_search_copy]
+        # d[keep_search_copy] = (d[keep_search_copy] + lb[keep_search_copy]) / 2
+        idx_pos = t > 0
+        lb[keep_search] = torch.where(idx_pos, d[keep_search], lb[keep_search])
+        
+        idx_neg = t < 0
+        ub[keep_search] = torch.where(idx_neg, d[keep_search], ub[keep_search])
+        
+        d[keep_search] = (lb[keep_search] + ub[keep_search]) / 2
         
     # print('Use %d iterations' % i) 
     # print(diff(d,l))
@@ -353,16 +379,15 @@ def test_general_b_pn():
     y0 = torch.tanh(x)
     yu = ku * x + bu
     yl = kl * x + bl
-    print((yu>y0).min())
-    print((yl<y0).min())
+    # print((yu>y0).min())
+    # print((yl<y0).min())
+    print((yu>y0).all())
+    print((yl<y0).all())
     plt.plot(x.numpy(),y0.numpy(),'.')
     plt.plot(x.numpy(),yl.numpy(),'.')
     plt.plot(x.numpy(),yu.numpy(),'.')
+    plt.show()
     
 if __name__ == '__main__':
    testGetGeneralActivationBound()
-    
-    
-    
-    
-    
+   test_general_b_pn()
