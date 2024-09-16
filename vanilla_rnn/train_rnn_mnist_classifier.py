@@ -108,7 +108,7 @@ if __name__ == '__main__':
                         help = 'hidden layer size (default: 64)')
     parser.add_argument('--time-step', default = 7, type = int, metavar = 'TS',
                         help = 'number of slices to cut the 28*28 image into, it should be a factor of 28 (default: 7)')
-    parser.add_argument('--activation', default = 'tanh', type = str, metavar = 'a',
+    parser.add_argument('--activation', default = 'relu', type = str, metavar = 'a',
                         help = 'nonlinearity used in the RNN, can be either tanh or relu (default: tanh)')
     parser.add_argument('--save_dir', default = '../models/mnist_classifier/', type = str, metavar = 'SD',
                         help = 'the directory to save the trained model')

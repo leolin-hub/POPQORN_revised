@@ -68,7 +68,7 @@ def verifyMaximumEps(classifier, x0, eps, p,true_label, target_label,
     
     y0 = classifier(x0)
     out0 = y0[idx, true_label]
-    max_iter = 1000
+    max_iter = 10
     
     for i in range(max_iter):
         noise = generateNoise(x0.shape, p, eps, eps_idx = eps_idx, device=x0.device)

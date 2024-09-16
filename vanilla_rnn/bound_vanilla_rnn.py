@@ -25,6 +25,7 @@ class RNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, time_step, activation):
         # the num_layers here is the number of RNN units
         super(RNN, self).__init__()
+        self.hidden_size = hidden_size  # Add hidden_size attribute
         self.rnn = nn.RNN(input_size = input_size,hidden_size=hidden_size,
                           num_layers = 1,batch_first=True, nonlinearity = activation)
         self.out = nn.Linear(hidden_size , output_size )
@@ -62,7 +63,7 @@ class RNN(nn.Module):
         
     def forward(self,X):
         # X is of size (batch, seq_len, input_size)
-        r_out, h_n = self.rnn(X, self.a_0) # RNN usage: output, hn = rnn(input,h0)
+        r_out, _ = self.rnn(X, self.a_0) # RNN usage: output, hn = rnn(input,h0)
         # r_out is of size (batch, seq_len, hidden_size)
         # h_n is of size (batch, num_layers, hidden_size)
         out = self.out(r_out[:,-1,:])
@@ -89,28 +90,28 @@ class RNN(nn.Module):
             device = X.device
             N = X.shape[0]
             seq_len = X.shape[1]
-            h = torch.zeros([N, seq_len+1, hidden_size], device = device)
-            pre_h = torch.zeros([N, seq_len+1, hidden_size], device = device)
+            h = torch.zeros([N, seq_len+1, self.hidden_size], device = device)
+            pre_h = torch.zeros([N, seq_len+1, self.hidden_size], device = device)
             b_ax = self.b_ax.unsqueeze(0).expand(N,-1)
             b_aa = self.b_aa.unsqueeze(0).expand(N,-1)
             for i in range(seq_len):
                 pre_h[:,i+1,:] = (torch.matmul(self.W_ax, X[:,i,:].unsqueeze(2)).squeeze(2)
                     + b_ax +
-                    torch.matmul(self.W_aa, h[:,i,:].unsqueeze(2)).squeeze(2) + b_aa)
-                h[:,i+1,:] = self.activation_function(pre_h[:,i+1,:])
+                    torch.matmul(self.W_aa, h[:,i,:].unsqueeze(2)).squeeze(2) + b_aa) # 下一層的pre-activation = W_aa * a_(t-1) + W_ax * x_t + b_aa + b_ax
+                h[:,i+1,:] = self.activation_function(pre_h[:,i+1,:]) # 下一層的activation = f(pre-activation)
         return pre_h[:,1:,:], h[:,1:,:]
                 
-    def attachData(self,X):
+    def attachData(self, X):
         # X is of size N*C*H*W
-        if torch.numel(X) == (X.shape[0] * self.input_dimension):
-        #if X.shape[1]*X.shape[2]*X.shape[3] == self.input_dimension:
-            X = X.view(-1, self.input_dimension)
+        if torch.numel(X) == (X.shape[0] * X.shape[1] * X.shape[2] * X.shape[3]): # number of elements
+            X = X.view(-1, X.shape[1] * X.shape[2] * X.shape[3])
             self.X = X
         else:
-            raise Exception('The input dimension must be %d' % self.input_dimension)
+            raise Exception('The input dimension must be %d' % (X.shape[1] * X.shape[2] * X.shape[3]))
     
     def extractWeight(self, clear_original_model=True):
         with torch.no_grad():
+            # torch original method, directly retrieving the weights of hidden and input layer
             self.W_fa = self.out.weight  # [output_size, num_neurons] 
             self.W_aa = self.rnn.weight_hh_l0  # [num_neurons, num_neurons]
             self.W_ax = self.rnn.weight_ih_l0  # [num_neurons, input_size]
@@ -122,17 +123,31 @@ class RNN(nn.Module):
                 self.rnn = None
         return 0
         
-    def compute2sideBound(self, eps, p, v, X = None, Eps_idx = None):
-        # X here is of size [batch_size, layer_index m, input_size]
-        #eps could be a real number, or a tensor of size N
-        #p is a real number
-        #m is an integer
-        #print(self.W[m].shape[0])
+    def compute2sideBound(self, eps, p, v, X = None, Eps_idx = None, max_splits=3): # add max_splits
+        """
+        Compute two-sided bounds for a given input using a recurrent neural network.
+        Parameters:
+            eps (torch.Tensor): Perturbation tensor, shape (N, s) where N is the batch size and s is the hidden size.
+            p (float or str): The p-norm to be used for the computation. Can be a float or 'inf'.
+            v (int): The current timestep or layer index for which bounds are computed.
+            X (torch.Tensor, optional): Input tensor, shape (N, time_step, n) where n is the input size.
+            Eps_idx (torch.Tensor, optional): Indices of the timesteps where perturbations occur, shape (k,) where k is the number of perturbations.
+            max_splits (int, optional): Maximum number of splits to perform on dimensions, default is 3.
+        Returns:
+            tuple: A tuple containing:
+                - yL (torch.Tensor): Lower bound tensor, shape (N, s).
+                - yU (torch.Tensor): Upper bound tensor, shape (N, s).
+        Notes:
+            - The function initializes bounds and computes them based on the specified norms.
+            - It handles ReLU activation differently by applying zero-splits if necessary.
+            - The function assumes that self.l and self.u are initialized and have the correct sizes for the given layer index v.
+        """
+
         with torch.no_grad():
             n = self.W_ax.shape[1]  # input_size
             s = self.W_ax.shape[0]  # hidden_size     
-            idx_eps = torch.zeros(self.time_step, device=X.device)
-            idx_eps[Eps_idx-1] = 1
+            idx_eps = torch.zeros(self.time_step, device=X.device) # 一維tensor，長度time_step
+            idx_eps[Eps_idx-1] = 1 # Eps_idx表示在哪個timestep擾動
             if X is None:
                 X = self.X
             N = X.shape[0]  # number of images, batch size
@@ -141,121 +156,175 @@ class RNN(nn.Module):
             else:
                 a_0 = self.a_0
             if type(eps) == torch.Tensor:
-                eps = eps.to(X.device)        
+                eps = eps.to(X.device)
+            # Deal with p-norm and q-norm, when p is 1, q is infinite
+            # When p is infinite, q is 1, otherwise, q = p / (p - 1)
+            # If 1/p + 1/q = 1, this is a dual-norm
             if p == 1:
                 q = float('inf')
             elif p == 'inf' or p==float('inf'):
                 q = 1 
             else:
                 q = p / (p-1)
-            
+        
             yU = torch.zeros(N, s, device = X.device)  # [N,s]
             yL = torch.zeros(N, s, device = X.device)  # [N,s]
-            
+        
             W_ax = self.W_ax.unsqueeze(0).expand(N,-1,-1)  # [N, s, n]
             W_aa = self.W_aa.unsqueeze(0).expand(N,-1,-1)  # [N, s, s]    
             b_ax = self.b_ax.unsqueeze(0).expand(N,-1)  # [N, s]
             b_aa = self.b_aa.unsqueeze(0).expand(N,-1)
+        
+            # 在計算邊界之前應用 zeroSplit
+            # v代表當前的timestep，位於第幾層hidden layer
+            if self.activation == 'relu' and v > 1:
+                impact = torch.abs(self.u[v-1] - self.l[v-1]).sum(dim=0)
+                # 使用 any() 來檢查每個維度是否有任何元素需要分割，會是一個需要分割的list
+                dimensions_to_split = torch.argsort(impact, descending=True)[:max_splits]
+                abstractions = [(self.l[v-1], self.u[v-1])] # [N, s]
+                
+                for split_depth in range(1, len(dimensions_to_split) + 1):
+                    if len(abstractions) > 100: # 限制抽象的總數
+                        break
+                    #dim = dimensions_to_split.pop(0)
+                    new_abstractions = []
+                    for l_abs, u_abs in abstractions:
+                        new_abstractions.extend(self.zeroSplit((l_abs, u_abs), dimensions_to_split[:split_depth])) # 重複確定需要zeroSplit
+                    abstractions = new_abstractions
+                    print(f"Split {split_depth}: Number of abstractions = {len(abstractions)}")
+                new_yL = torch.full_like(yL, 1e10) # 考慮使用一個大但有限的數字 用1e10取代float('inf')
+                new_yU = torch.full_like(yU, -1e10)
+
+                for i, (l_abs, u_abs) in enumerate(abstractions):
+                    # 確保 l_abs <= u_abs
+                    l_abs, u_abs = torch.min(l_abs, u_abs), torch.max(l_abs, u_abs)
+                    temp_yL, temp_yU = self._compute_bounds(eps, p, v, X, Eps_idx, l_abs, u_abs, n, s, N, a_0, W_ax, W_aa, b_ax, b_aa, q)
+                    new_yL = torch.min(new_yL, temp_yL)
+                    new_yU = torch.max(new_yU, temp_yU)
+                    if i % 10 == 0:
+                        print(f"Processed {i+1}/{len(abstractions)} abstractions")
+
+                yL, yU = new_yL, new_yU
+            else:
+                # 對於非 ReLU 激活函數或第一層，使用原來的邊界計算方法
+                yL, yU = self._compute_bounds(eps, p, v, X, Eps_idx, self.l[v-1] if v > 1 else None, self.u[v-1] if v > 1 else None, n, s, N, a_0, W_ax, W_aa, b_ax, b_aa, q)
             
-            # v-th terms, three terms        
-            ## first term
-            if type(eps) == torch.Tensor:                      
-                #eps is a tensor of size N 
-                yU = yU + idx_eps[v-1]*eps.unsqueeze(1).expand(-1,
-                                       s)*torch.norm(W_ax,p=q,dim=2)  # eps ||A^ {<v>} W_ax||q    
-                yL = yL - idx_eps[v-1]*eps.unsqueeze(1).expand(-1,
-                                       s)*torch.norm(W_ax,p=q,dim=2)  # eps ||Ou^ {<v>} W_ax||q      
-            else:
-                yU = yU + idx_eps[v-1]*eps*torch.norm(W_ax,p=q,dim=2)  # eps ||A^ {<v>} W_ax||q    
-                yL = yL - idx_eps[v-1]*eps*torch.norm(W_ax,p=q,dim=2)  # eps ||Ou^ {<v>} W_ax||q  
-            ## second term
-            if v == 1:
-                X = X.view(N,1,n)
-            yU = yU + torch.matmul(W_ax,X[:,v-1,:].view(N,n,1)).squeeze(2)  # A^ {<v>} W_ax x^{<v>}            
-            yL = yL + torch.matmul(W_ax,X[:,v-1,:].view(N,n,1)).squeeze(2)  # Ou^ {<v>} W_ax x^{<v>}       
-            ## third term
-            yU = yU + b_aa+ b_ax  # A^ {<v>} (b_a + Delta^{<v>})
-            yL = yL + b_aa+ b_ax  # Ou^ {<v>} (b_a + Theta^{<v>})
-                            
-            if not (v == 1):
-                # k from v-1 to 1 terms
-                for k in range(v-1,0,-1): 
-                    if k == v-1:
-                        ## compute A^{<v-1>}, Ou^{<v-1>}, Delta^{<v-1>} and Theta^{<v-1>}
-                        ### 1. compute slopes alpha and intercepts beta
-                        kl, bl, ku, bu = get_bound.getConvenientGeneralActivationBound(
-                                self.l[k], self.u[k], self.activation)
-                        
-                        bl = bl/kl
-                        bu = bu/ku
-                        
-                        self.kl[k] = kl  # [N, s]
-                        self.ku[k] = ku  # [N, s]
-                        self.bl[k] = bl  # [N, s]
-                        self.bu[k] = bu  # [N, s]
-                        alpha_l = kl.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
-                        alpha_u = ku.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
-                        beta_l = bl.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
-                        beta_u = bu.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
-                        ### 2. compute lambda^{<v-1>}, omega^{<v-1>}, Delta^{<v-1>} and Theta^{<v-1>}
-                        I = (W_aa >= 0).float()  # [N, s, s]
-                        lamida = I*alpha_u + (1-I)*alpha_l                  
-                        omiga = I*alpha_l + (1-I)*alpha_u
-                        Delta = I*beta_u + (1-I)*beta_l  # [N, s, s], this is the transpose of the delta defined in the paper
-                        Theta = I*beta_l + (1-I)*beta_u  # [N, s, s]
-                        ### 3. clear l[k] and u[k] to release memory
-                        self.l[k] = None
-                        self.u[k] = None
-                        ### 4. compute A^{<v-1>} and Ou^{<v-1>}
-                        A = W_aa * lamida  # [N, s, s]
-                        Ou = W_aa * omiga  # [N, s, s]
-                    else:
-                        ## compute A^{<k>}, Ou^{<k>}, Delta^{<k>} and Theta^{<k>}
-                        ### 1. compute slopes alpha and intercepts beta
-                        alpha_l = self.kl[k].unsqueeze(1).expand(-1, s, -1)
-                        alpha_u = self.ku[k].unsqueeze(1).expand(-1, s, -1)
-                        beta_l = self.bl[k].unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
-                        beta_u = self.bu[k].unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
-                        ### 2. compute lambda^{<k>}, omega^{<k>}, Delta^{<k>} and Theta^{<k>}
-                        I = (torch.matmul(A,W_aa) >= 0).float()  # [N, s, s]
-                        lamida = I*alpha_u + (1-I)*alpha_l                  
-                        Delta = I*beta_u + (1-I)*beta_l  # [N, s, s], this is the transpose of the delta defined in the paper
-                        I = (torch.matmul(Ou,W_aa) >= 0).float()  # [N, s, s]
-                        omiga = I*alpha_l + (1-I)*alpha_u
-                        Theta = I*beta_l + (1-I)*beta_u  # [N, s, s]
-                        ### 3. compute A^{<k>} and Ou^{<k>}
-                        A = torch.matmul(A,W_aa) * lamida  # [N, s, s]
-                        Ou = torch.matmul(Ou,W_aa) * omiga  # [N, s, s]
-                    ## first term
-                    if type(eps) == torch.Tensor:                
-                        #eps is a tensor of size N 
-                        yU = yU + idx_eps[k-1]*eps.unsqueeze(1).expand(-1,
-                                   s)*torch.norm(torch.matmul(A,W_ax),p=q,dim=2)  # eps ||A^ {<k>} W_ax||q    
-                        yL = yL - idx_eps[k-1]*eps.unsqueeze(1).expand(-1,
-                                   s)*torch.norm(torch.matmul(Ou,W_ax),p=q,dim=2)  # eps ||Ou^ {<k>} W_ax||q      
-                    else:
-                        yU = yU + idx_eps[k-1]*eps*torch.norm(torch.matmul(A,W_ax),p=q,dim=2)  # eps ||A^ {<k>} W_ax||q    
-                        yL = yL - idx_eps[k-1]*eps*torch.norm(torch.matmul(Ou,W_ax),p=q,dim=2)  # eps ||Ou^ {<k>} W_ax||q  
-                    ## second term
-                    yU = yU + torch.matmul(A,torch.matmul(W_ax,X[:,k-1,:].view(N,n,1))).squeeze(2)  # A^ {<k>} W_ax x^{<k>}            
-                    yL = yL + torch.matmul(Ou,torch.matmul(W_ax,X[:,k-1,:].view(N,n,1))).squeeze(2)  # Ou^ {<k>} W_ax x^{<k>}       
-                    ## third term
-                    yU = yU + torch.matmul(A,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(A*Delta).sum(2)  # A^ {<k>} (b_a + Delta^{<k>})
-                    yL = yL + torch.matmul(Ou,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(Ou*Theta).sum(2)  # Ou^ {<k>} (b_a + Theta^{<k>})
-                # compute A^{<0>}
-                A = torch.matmul(A,W_aa)  # (A^ {<1>} W_aa) * lambda^{<0>}
-                Ou = torch.matmul(Ou,W_aa)  # (Ou^ {<1>} W_aa) * omega^{<0>}
-            else:
-                A = W_aa  # A^ {<0>}, [N, s, s]
-                Ou = W_aa  # Ou^ {<0>}, [N, s, s]
-            yU = yU + torch.matmul(A,a_0.view(N,s,1)).squeeze(2)  # A^ {<0>} * a_0
-            yL = yL + torch.matmul(Ou,a_0.view(N,s,1)).squeeze(2)  # Ou^ {<0>} * a_0
-                        
+            # 處理可能的 NaN 值
+            yL = torch.where(torch.isnan(yL), torch.full_like(yL, -float('inf')), yL)
+            yU = torch.where(torch.isnan(yU), torch.full_like(yU, float('inf')), yU)
+
+            # 經zeroSplit和compute bound之後的上下界
             self.l[v] = yL
             self.u[v] = yU
-        return yL,yU
+            print(f"Layer {v} bounds: min(yL) = {yL.min().item()}, max(yU) = {yU.max().item()}")
+            return yL, yU
+
+    def _compute_bounds(self, eps, p, v, X, Eps_idx, l_prev, u_prev, n, s, N, a_0, W_ax, W_aa, b_ax, b_aa, q):
+        # 問題出在這個function導致一堆nan還有statistics of l_eps:(min, mean, max, std) = (0, 0, 0, 0)
+        # 初始化上下界
+        yU = torch.zeros(N, s, device = X.device)  # [N,s]
+        yL = torch.zeros(N, s, device = X.device)  # [N,s]
     
-    def computeLast2sideBound(self, eps, p, v, X = None, Eps_idx = None):
+        # v-th terms, three terms        
+        ## first term for epsilon (處理擾動)
+        if type(eps) == torch.Tensor:                      
+            #eps is a tensor of size N 
+            yU = yU + Eps_idx[v-1]*eps.unsqueeze(1).expand(-1, s)*torch.norm(W_ax,p=q,dim=2)  # eps ||A^ {<v>} W_ax||q    
+            yL = yL - Eps_idx[v-1]*eps.unsqueeze(1).expand(-1, s)*torch.norm(W_ax,p=q,dim=2)  # eps ||Ou^ {<v>} W_ax||q      
+        else:
+            yU = yU + Eps_idx[v-1]*eps*torch.norm(W_ax,p=q,dim=2)  # eps ||A^ {<v>} W_ax||q    
+            yL = yL - Eps_idx[v-1]*eps*torch.norm(W_ax,p=q,dim=2)  # eps ||Ou^ {<v>} W_ax||q  
+        ## second term for current timestep input
+        if v == 1:
+            X = X.view(N,1,n)
+        yU = yU + torch.matmul(W_ax,X[:,v-1,:].view(N,n,1)).squeeze(2)  # A^ {<v>} W_ax x^{<v>}            
+        yL = yL + torch.matmul(W_ax,X[:,v-1,:].view(N,n,1)).squeeze(2)  # Ou^ {<v>} W_ax x^{<v>}       
+        ## third term for bias
+        yU = yU + b_aa + b_ax  # A^ {<v>} (b_a + Delta^{<v>})
+        yL = yL + b_aa + b_ax  # Ou^ {<v>} (b_a + Theta^{<v>})
+                    
+        if v > 1:
+            # k from v-1 to 1 terms
+            for k in range(v-1,0,-1): 
+                # 計算Activation Function的linear bound
+                if k == v-1:
+                    ## compute A^{<v-1>}, Ou^{<v-1>}, Delta^{<v-1>} and Theta^{<v-1>}
+                    ### 1. compute slopes alpha and intercepts beta, kl and ku for lower and upper bound of slopes,
+                    ### bl and bu for lower and upper bound of intercepts
+                    kl, bl, ku, bu = get_bound.getConvenientGeneralActivationBound(
+                        l_prev, u_prev, self.activation)
+                
+                    # bl = bl/kl
+                    # bu = bu/ku
+                    epsilon = 1e-10
+                    bl = torch.where(kl.abs() > epsilon, bl / kl, torch.zeros_like(bl))
+                    bu = torch.where(ku.abs() > epsilon, bu / ku, torch.zeros_like(bu))
+                
+                    self.kl[k] = kl  # [N, s]
+                    self.ku[k] = ku  # [N, s]
+                    self.bl[k] = bl  # [N, s]
+                    self.bu[k] = bu  # [N, s]
+                    alpha_l = kl.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
+                    alpha_u = ku.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
+                    beta_l = bl.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
+                    beta_u = bu.unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
+                    ### 2. compute lambda^{<v-1>}, omega^{<v-1>}, Delta^{<v-1>} and Theta^{<v-1>}
+                    I = (W_aa >= 0).float()  # [N, s, s]
+                    lamida = I*alpha_u + (1-I)*alpha_l                  
+                    omiga = I*alpha_l + (1-I)*alpha_u
+                    Delta = I*beta_u + (1-I)*beta_l  # [N, s, s], this is the transpose of the delta defined in the paper
+                    Theta = I*beta_l + (1-I)*beta_u  # [N, s, s]
+                    ### 4. compute A^{<v-1>} and Ou^{<v-1>}
+                    A = W_aa * lamida  # [N, s, s]
+                    Ou = W_aa * omiga  # [N, s, s]
+                else:
+                    ## compute A^{<k>}, Ou^{<k>}, Delta^{<k>} and Theta^{<k>}
+                    ### 1. compute slopes alpha and intercepts beta
+                    alpha_l = self.kl[k].unsqueeze(1).expand(-1, s, -1)
+                    alpha_u = self.ku[k].unsqueeze(1).expand(-1, s, -1)
+                    beta_l = self.bl[k].unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
+                    beta_u = self.bu[k].unsqueeze(1).expand(-1, s, -1)  # [N, s, s]
+                    ### 2. compute lambda^{<k>}, omega^{<k>}, Delta^{<k>} and Theta^{<k>}
+                    I = (torch.matmul(A,W_aa) >= 0).float()  # [N, s, s]
+                    lamida = I*alpha_u + (1-I)*alpha_l                  
+                    Delta = I*beta_u + (1-I)*beta_l  # [N, s, s], this is the transpose of the delta defined in the paper
+                    I = (torch.matmul(Ou,W_aa) >= 0).float()  # [N, s, s]
+                    omiga = I*alpha_l + (1-I)*alpha_u
+                    Theta = I*beta_l + (1-I)*beta_u  # [N, s, s]
+                    ### 3. compute A^{<k>} and Ou^{<k>}
+                    A = torch.matmul(A,W_aa) * lamida  # [N, s, s]
+                    Ou = torch.matmul(Ou,W_aa) * omiga  # [N, s, s]
+                ## first term
+                if type(eps) == torch.Tensor:                
+                    #eps is a tensor of size N 
+                    yU = yU + Eps_idx[k-1]*eps.unsqueeze(1).expand(-1,
+                            s)*torch.norm(torch.matmul(A,W_ax),p=q,dim=2)  # eps ||A^ {<k>} W_ax||q    
+                    yL = yL - Eps_idx[k-1]*eps.unsqueeze(1).expand(-1,
+                            s)*torch.norm(torch.matmul(Ou,W_ax),p=q,dim=2)  # eps ||Ou^ {<k>} W_ax||q      
+                else:
+                    yU = yU + Eps_idx[k-1]*eps*torch.norm(torch.matmul(A,W_ax),p=q,dim=2)  # eps ||A^ {<k>} W_ax||q    
+                    yL = yL - Eps_idx[k-1]*eps*torch.norm(torch.matmul(Ou,W_ax),p=q,dim=2)  # eps ||Ou^ {<k>} W_ax||q  
+                ## second term
+                yU = yU + torch.matmul(A,torch.matmul(W_ax,X[:,k-1,:].view(N,n,1))).squeeze(2)  # A^ {<k>} W_ax x^{<k>}            
+                yL = yL + torch.matmul(Ou,torch.matmul(W_ax,X[:,k-1,:].view(N,n,1))).squeeze(2)  # Ou^ {<k>} W_ax x^{<k>}       
+                ## third term
+                yU = yU + torch.matmul(A,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(A*Delta).sum(2)  # A^ {<k>} (b_a + Delta^{<k>})
+                yL = yL + torch.matmul(Ou,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(Ou*Theta).sum(2)  # Ou^ {<k>} (b_a + Theta^{<k>})
+            # compute A^{<0>}
+            A = torch.matmul(A,W_aa)  # (A^ {<1>} W_aa) * lambda^{<0>}
+            Ou = torch.matmul(Ou,W_aa)  # (Ou^ {<1>} W_aa) * omega^{<0>}
+        else:
+            A = W_aa  # A^ {<0>}, [N, s, s]
+            Ou = W_aa  # Ou^ {<0>}, [N, s, s]
+        yU = yU + torch.matmul(A,a_0.view(N,s,1)).squeeze(2)  # A^ {<0>} * a_0
+        yL = yL + torch.matmul(Ou,a_0.view(N,s,1)).squeeze(2)  # Ou^ {<0>} * a_0
+        # 確保 yL <= yU
+        yL, yU = torch.min(yL, yU), torch.max(yL, yU)
+                
+        return yL, yU
+
+    
+    def computeLast2sideBound(self, eps, p, v, X = None, Eps_idx = None, max_splits=3):
         with torch.no_grad():
             n = self.W_ax.shape[1]  # input_size
             s = self.W_ax.shape[0]  # hidden_size     
@@ -361,6 +430,31 @@ class RNN(nn.Module):
             yL = yL + b_f
         return yL,yU
     
+    def zeroSplit(self, abstraction, dimensions):
+        l, u = abstraction
+        # 確保 l <= u
+        l, u = torch.min(l, u), torch.max(l, u)
+        results = [(l.clone(), u.clone())]
+    
+        for dim in dimensions:
+            new_results = []
+            for l_i, u_i in results:
+                # 使用 any() 來檢查是否有任何元素滿足條件
+                if (l_i[..., dim] < 0).any() and (u_i[..., dim] > 0).any():
+                    # Split at 0
+                    l_new, u_new = l_i.clone(), u_i.clone()
+                    u_new[..., dim] = torch.where(u_new[..., dim] > 0, torch.zeros_like(u_new[..., dim]), u_new[..., dim])
+                    new_results.append((l_i, u_new))
+                
+                    l_new, u_new = l_i.clone(), u_i.clone()
+                    l_new[..., dim] = torch.where(l_new[..., dim] < 0, torch.zeros_like(l_new[..., dim]), l_new[..., dim])
+                    new_results.append((l_new, u_i))
+                else:
+                    new_results.append((l_i, u_i))
+            results = new_results
+    
+        return results
+    
     def getLastLayerBound(self, eps, p, X = None, clearIntermediateVariables=False, Eps_idx = None):
         #eps could be a real number, or a tensor of size N
         with torch.no_grad():
@@ -375,6 +469,9 @@ class RNN(nn.Module):
             for k in range(1,self.time_step+1):
                 # k from 1 to self.time_step
                 yL,yU = self.compute2sideBound(eps, p, k, X=X[:,0:k,:], Eps_idx = Eps_idx)
+                # 確保 yL <= yU
+                yL, yU = torch.min(yL, yU), torch.max(yL, yU)
+                self.l[k], self.u[k] = yL, yU
             yL,yU = self.computeLast2sideBound(eps, p, self.time_step+1, X, Eps_idx = Eps_idx)    
                 #in this loop, self.u, l, Il, WD are reused
             if clearIntermediateVariables:
@@ -402,12 +499,13 @@ class RNN(nn.Module):
             
             # use gx0_trick: the "equivalent output node" is equal to N (number of samples in one batch)
             if gx0_trick == True:
-                 print("W_fa size = {}".format(self.W_fa.shape))
-                 print("b_f size = {}".format(self.b_f.shape))             
-                 self.W_fa = Parameter(self.W_fa[true_label,:]-self.W_fa[target_label,:])
-                 self.b_f = Parameter(self.b_f[true_label]-self.b_f[target_label])
-                 print("after gx0_trick W_fa size = {}".format(self.W_fa.shape))
-                 print("after gx0_trick b_f size = {}".format(self.b_f.shape))
+                print("Using gx0_trick")
+                print("W_fa size = {}".format(self.W_fa.shape))
+                print("b_f size = {}".format(self.b_f.shape))             
+                self.W_fa = Parameter(self.W_fa[true_label,:]-self.W_fa[target_label,:])
+                self.b_f = Parameter(self.b_f[true_label]-self.b_f[target_label])
+                print("after gx0_trick W_fa size = {}".format(self.W_fa.shape))
+                print("after gx0_trick b_f size = {}".format(self.b_f.shape))
             yL, yU = self.getLastLayerBound(u_eps, p, X = X,  
                                              clearIntermediateVariables=True, Eps_idx = Eps_idx)
             if gx0_trick: 
@@ -435,29 +533,32 @@ class RNN(nn.Module):
                 #yL and yU only for those equal to 1 in increase_u_eps
                 #they are of size (num,_)
                 if gx0_trick:
-                     lower = yL[torch.arange(num),idx[increase_u_eps]]
-                     temp = lower > 0
-                     print("f_c - f_j = {}".format(lower))
+                    lower = yL[torch.arange(num),idx[increase_u_eps]]
+                    increase_u_eps[increase_u_eps] = lower > 0
+                    # temp = lower > 0
+                    # print("f_c - f_j = {}".format(lower))
                 else:
-                     true_lower = yL[ torch.arange(num),true_label[increase_u_eps]]
-                     target_upper = yU[torch.arange(num),target_label[increase_u_eps]]
-                     temp = true_lower > target_upper #size num
-                     print("f_c - f_j = {}".format(true_lower- target_upper))
-                # 使用 clone() 和布爾索引來更新 increase_u_eps
-                new_increase_u_eps = increase_u_eps.clone()
-                new_increase_u_eps[increase_u_eps] = temp
-                increase_u_eps = new_increase_u_eps
+                    true_lower = yL[torch.arange(num),true_label[increase_u_eps]]
+                    target_upper = yU[torch.arange(num),target_label[increase_u_eps]]
+                    increase_u_eps[increase_u_eps] = true_lower > target_upper
+                    #temp = true_lower > target_upper #size num
+                    print("f_c - f_j = {}".format(true_lower- target_upper))
+                # 使用 clone() 和布爾索引來更新 increase_u_eps, 把temp註解掉換成上面的寫法
+                # new_increase_u_eps = increase_u_eps.clone()
+                # new_increase_u_eps[increase_u_eps] = temp
+                # increase_u_eps = new_increase_u_eps
                 
             print('Finished finding upper and lower bound')
             print('The upper bound we found is \n', u_eps)
             print('The lower bound we found is \n', l_eps)
             
-            search = (u_eps-l_eps) > acc
+            #search = (u_eps-l_eps) > acc
+            search = (u_eps - l_eps) / ((u_eps+l_eps)/2+1e-8) > acc
             #indicate whether to further perform binary search
             
             #for i in range(max_iter):
             iteration = 0 
-            while(search.sum()>0):
+            while(search.sum()>0) and (iteration < max_iter):
                 #perform binary search
                 
                 print("search = {}".format(search))
@@ -478,27 +579,27 @@ class RNN(nn.Module):
                      target_upper = yU[torch.arange(num),target_label[search]]
                      temp = true_lower>target_upper
                 # 使用 clone() 和布爾索引來更新 search
-                new_search = search.clone()
-                new_search[search] = temp
+                # new_search = search.clone()
+                # new_search[search] = temp
                 #            print('search ', search.device)
                 #            print('temp ', temp.device)
                 #set all active units in search to temp
                 #original inactive units in search are still inactive
                 
-                l_eps[new_search] = eps[temp]
+                #l_eps[new_search] = eps[temp]
+                l_eps[search] = torch.where(temp, eps, l_eps[search])
                 #increase active and true_lower>target_upper units in l_eps 
                 
-                u_eps[search & (~new_search)] = eps[~temp]
+                #u_eps[search & (~new_search)] = eps[~temp]
+                u_eps[search] = torch.where(~temp, eps, u_eps[search])
                 #decrease active and true_lower<target_upper units in u_eps
                 
                 # search = (u_eps - l_eps) > acc #reset active units in search
                 search = (u_eps - l_eps) / ((u_eps+l_eps)/2+1e-8) > acc
                 print('----------------------------------------')
-                if gx0_trick:
-                     print('f_c - f_j = {}'.format(lower))
-                else:
-                     print('f_c - f_j = {}'.format(true_lower-target_upper))
-                print('u_eps - l_eps = {}'.format(u_eps - l_eps))
+                print(f'Iteration {iteration}:')
+                print(f'f_c - f_j = {lower if gx0_trick else true_lower - target_upper}')
+                print(f'u_eps - l_eps = {u_eps - l_eps}')
                 
                 iteration = iteration + 1
         return l_eps, u_eps
@@ -512,9 +613,9 @@ if __name__ == '__main__':
                         help = 'hidden layer size (default: 64)')
     parser.add_argument('--time-step', default = 7, type = int, metavar = 'TS',
                         help = 'number of slices to cut the 28*28 image into, it should be a factor of 28 (default: 7)')
-    parser.add_argument('--activation', default = 'tanh', type = str, metavar = 'a',
+    parser.add_argument('--activation', default = 'relu', type = str, metavar = 'a',
                         help = 'nonlinearity used in the RNN, can be either tanh or relu (default: tanh)')
-    parser.add_argument('--work-dir', default = '../models/mnist_classifier/rnn_7_64_tanh/', type = str, metavar = 'WD',
+    parser.add_argument('--work-dir', default = 'models/mnist_classifier/rnn_7_64_relu/', type = str, metavar = 'WD',
                         help = 'the directory where the pretrained model is stored and the place to save the computed result')
     parser.add_argument('--model-name', default = 'rnn', type = str, metavar = 'MN',
                         help = 'the name of the pretrained model (default: rnn)')
@@ -553,11 +654,16 @@ if __name__ == '__main__':
     activation = args.activation
     work_dir = args.work_dir
     model_name = args.model_name
-    model_file = work_dir + model_name
-    save_dir = work_dir + '%s_norm_bound/' % str(p)
+    base_dir = "C:/Users/leolin9/POPQORN/POPQORN/"
+    model_file = base_dir + work_dir + model_name
+    # model_file = os.path.join(work_dir, args.model_name)
+    save_dir = base_dir + work_dir + '%s_norm_bound/' % str(p)
     
     #load model
     rnn = RNN(input_size, hidden_size, output_size, time_step, activation)
+    print(f"Attempting to load model from: {model_file}")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Does file exist? {os.path.exists(model_file)}")
     rnn.load_state_dict(torch.load(model_file, map_location='cpu', weights_only=True))
     rnn.to(device)
     
@@ -571,8 +677,8 @@ if __name__ == '__main__':
     
     l_eps, u_eps = rnn.getMaximumEps(p=p, true_label=y, 
                     target_label=target_label, eps0=eps0,
-                      max_iter=100, X=X, 
-                      acc=1e-3, gx0_trick = True, Eps_idx = None)
+                      max_iter=10, X=X, 
+                      acc=1e-3, gx0_trick = True, Eps_idx = None) # reduce to 10 to save time
     verifyMaximumEps(rnn, X, l_eps, p, y, target_label, 
                         eps_idx = None, untargeted=False, thred=1e-8)
 

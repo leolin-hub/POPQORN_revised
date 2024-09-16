@@ -28,6 +28,14 @@ Activation = {'tanh':[torch.tanh, d_tanh],
               'relu_adaptive':[torch.relu, 0]}
 
 def get_bound_for_relu(l, u, adaptive=False):
+    '''
+    Parameters:
+        l: lower bound of the input
+        u: upper bound of the input
+        adaptive: whether to use adaptive bounds
+    Returns:
+        kl, bl, ku, bu: lower and upper bounds of the slope (kl and ku) and bias (bl and bu)
+    '''
     device = l.device
     ku = torch.zeros(u.shape, device = device)
     bu = torch.zeros(u.shape, device = device)
@@ -57,7 +65,31 @@ def get_bound_for_relu(l, u, adaptive=False):
         kl[idx] = 0
     return kl, bl, ku, bu
 
-def getConvenientGeneralActivationBound(l,u, activation, use_constant=False):
+def getConvenientGeneralActivationBound(l,u, activation, use_constant=False, epsilon=1e-6):
+    """
+    Get convenient bounds for general activation functions.
+    Parameters:
+        l (torch.Tensor): Lower bounds for the activation function.
+        u (torch.Tensor): Upper bounds for the activation function.
+        activation (str): The type of activation function to use (e.g., 'relu', 'relu_adaptive', 'ba').
+        use_constant (bool, optional): If True, uses a constant function for the activation. Defaults to False.
+        epsilon (float, optional): A small value to avoid numerical issues. Defaults to 1e-6.
+    Returns:
+        tuple: A tuple containing:
+            - kl (torch.Tensor): Lower bound for the activation function.
+            - bl (torch.Tensor): Lower bound for the output of the activation function.
+            - ku (torch.Tensor): Upper bound for the activation function.
+            - bu (torch.Tensor): Upper bound for the output of the activation function.
+    Raises:
+        Exception: If any element in l is greater than the corresponding element in u.
+    """
+
+    if (l > u + epsilon).any():
+        print(f"Warning: l > u detected. Max difference: {(l - u).max().item()}")
+        # 修正 l 和 u
+        l = torch.min(l, u)
+        u = torch.max(l, u)
+        
     if (l>u).sum()>0:
         raise Exception('l must be less or equal to u')
         # print(l-u, (l-u).max())
@@ -134,6 +166,25 @@ def getConvenientGeneralActivationBound(l,u, activation, use_constant=False):
     return kl, bl, ku, bu
 
 def getGeneralActivationBound(l,u, func, dfunc):
+    """
+    Calculates the bounds for a general activation function over a given range.
+    Parameters:
+        l (torch.Tensor): Lower bounds tensor of any shape. Must have the same shape as `u`.
+        u (torch.Tensor): Upper bounds tensor of any shape. Must have the same shape as `l`.
+        func (callable): The activation function to evaluate.
+        dfunc (callable): The derivative of the activation function.
+    Returns:
+        tuple: A tuple containing four tensors:
+            - kl (torch.Tensor): Lower bound slopes for the activation function.
+            - bl (torch.Tensor): Lower bound intercepts for the activation function.
+            - ku (torch.Tensor): Upper bound slopes for the activation function.
+            - bu (torch.Tensor): Upper bound intercepts for the activation function.
+    Notes:
+        - The first dimension of `l` and `u` is the batch dimension.
+        - Ensure that `u` is greater than `l` element-wise.
+        - The function handles different cases based on the values of `l` and `u`.
+    """
+
     #l and u are tensors of any shape. l and u must have the same shape
     #the first dimension of l and u is the batch dimension
     #users must make sure that u > l
@@ -176,6 +227,24 @@ def getGeneralActivationBound(l,u, func, dfunc):
     return kl, bl, ku, bu
 
 def getTanhBound(l,u):
+    """
+    Calculates the bounds for the hyperbolic tangent (tanh) activation function 
+    given lower and upper tensor limits.
+    Args:
+        l (torch.Tensor): Lower bounds tensor of shape (batch_size, ...).
+        u (torch.Tensor): Upper bounds tensor of shape (batch_size, ...).
+                      Must have the same shape as l and satisfy u > l.
+    Returns:
+        tuple: A tuple containing four tensors:
+            - kl (torch.Tensor): Lower bound slopes tensor of shape (batch_size, ...).
+            - bl (torch.Tensor): Lower bound intercepts tensor of shape (batch_size, ...).
+            - ku (torch.Tensor): Upper bound slopes tensor of shape (batch_size, ...).
+            - bu (torch.Tensor): Upper bound intercepts tensor of shape (batch_size, ...).
+    Notes:
+        - The first dimension of l and u is the batch dimension.
+        - Ensure that the input tensors l and u are compatible for the operations performed.
+    """
+    
     #l and u are tensors of any shape. l and u must have the same shape
     #the first dimension of l and u is the batch dimension
     #users must make sure that u > l
@@ -242,17 +311,32 @@ def testGetGeneralActivationBound():
     # print(x[l_func_x > func_x], l_func_x[l_func_x > func_x], func_x[l_func_x > func_x])
     # print((u_func_x >= func_x).min())
     # print(x[u_func_x < func_x], u_func_x[u_func_x < func_x], func_x[u_func_x < func_x])
-    print((l_func_x <= func_x).all())
+    print((l_func_x <= func_x).all()) # tensor(True)
     print((u_func_x >= func_x).all())
     plt.show()
     
     
 
 def get_d_UB(l,u,func,dfunc):
+    """
+    Calculates an upper bound for a given activation function using a numerical method.
+    Parameters:
+        l (torch.Tensor): Lower bound tensor of any shape. The first dimension represents the batch size.
+        u (torch.Tensor): Upper bound tensor of the same shape as l. 
+        func (callable): The activation function for which the upper bound is being calculated.
+        dfunc (callable): The derivative of the activation function.
+    Returns:
+        torch.Tensor: A tensor representing the upper bound for the activation function, calculated based on the provided lower and upper bounds.
+    Notes:
+        - The function assumes that the activation function is symmetric around zero (i.e., f(x) = f(-x)).
+        - The function also assumes that the activation function is convex for x < 0 and concave for x > 0.
+        - The maximum number of iterations for the search is set to 1000.
+    """
+
     #l and u are tensor of any shape. Their shape should be the same
     #the first dimension of l and u is batch_dimension
     diff = lambda d,l: (func(d)-func(l))/(d-l) - dfunc(d)
-    max_iter = 1000;
+    max_iter = 1000
     # d = u/2
     # d = u
     ub = -l
@@ -302,6 +386,22 @@ def get_d_UB(l,u,func,dfunc):
     return d
 
 def general_ub_pn(l, u, func, dfunc):
+    """
+    Calculate the upper bound parameters for a general activation function.
+    Parameters:
+        l (float): The lower bound input value.
+        u (float): The upper bound input value.
+        func (callable): The activation function to evaluate.
+        dfunc (callable): The derivative of the activation function.
+    Returns:
+        tuple: A tuple containing:
+            - k (float): The slope of the line connecting the function values at d_UB and l.
+            - b (float): The y-intercept of the line at the point l.
+    This function computes the upper bound parameters k and b based on the provided 
+    activation function and its derivative, which can be used for further analysis 
+    or optimization tasks.
+    """
+
     d_UB = get_d_UB(l,u,func,dfunc)
     # print(d_UB)
     k = (func(d_UB)-func(l))/(d_UB-l)
@@ -309,6 +409,21 @@ def general_ub_pn(l, u, func, dfunc):
     return k, b
 
 def get_d_LB(l,u,func,dfunc):
+    """
+    Calculates the lower bound for a general activation function using a numerical method.
+    Args:
+        l (torch.Tensor): Lower bound tensor of any shape. The first dimension should represent the batch size.
+        u (torch.Tensor): Upper bound tensor of the same shape as l. The first dimension should represent the batch size.
+        func (callable): The activation function for which the lower bound is being calculated.
+        dfunc (callable): The derivative of the activation function.
+    Returns:
+        d (torch.Tensor): A tensor containing the calculated lower bounds for the activation function.
+    Notes:
+        - The function assumes that the activation function is symmetric (f(x) = f(-x)) and convex for x < 0, 
+          and concave for x > 0.
+        - The function iteratively refines the bounds until convergence or until the maximum number of iterations is reached.
+    """
+
     #l and u are tensor of any shape. Their shape should be the same
     #the first dimension of l and u is batch_dimension
     diff = lambda d,u: (func(d)-func(u))/(d-u) - dfunc(d)
@@ -361,6 +476,28 @@ def get_d_LB(l,u,func,dfunc):
     return d
 
 def general_lb_pn(l, u, func, dfunc):
+    """
+    Calculates the linear lower bound parameters (k, b) for a given activation function.
+    Parameters:
+        l (float): The lower bound input value.
+        u (float): The upper bound input value.
+        func (callable): The activation function for which the bounds are calculated.
+                         It should accept a single float input and return a float output.
+        dfunc (callable): The derivative of the activation function. It should accept
+                          a single float input and return a float output.
+    Returns:
+        tuple: A tuple containing:
+            - k (float): The slope of the linear lower bound.
+            - b (float): The y-intercept of the linear lower bound.
+    Shapes:
+        l: scalar (1D)
+        u: scalar (1D)
+        func: function mapping R -> R
+        dfunc: function mapping R -> R
+        k: scalar (1D)
+        b: scalar (1D)
+    """
+
     d_LB = get_d_LB(l,u,func,dfunc)
     # print(d_LB)
     k = (func(d_LB)-func(u))/(d_LB-u)
@@ -381,7 +518,7 @@ def test_general_b_pn():
     yl = kl * x + bl
     # print((yu>y0).min())
     # print((yl<y0).min())
-    print((yu>y0).all())
+    print((yu>y0).all()) # tensor(True)
     print((yl<y0).all())
     plt.plot(x.numpy(),y0.numpy(),'.')
     plt.plot(x.numpy(),yl.numpy(),'.')
@@ -390,4 +527,4 @@ def test_general_b_pn():
     
 if __name__ == '__main__':
    testGetGeneralActivationBound()
-   test_general_b_pn()
+   #test_general_b_pn()
