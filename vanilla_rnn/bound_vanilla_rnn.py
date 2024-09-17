@@ -433,23 +433,31 @@ class RNN(nn.Module):
         l, u = abstraction
         # 確保 l <= u
         l, u = torch.min(l, u), torch.max(l, u)
+
+        # Initialize results list, only the original abstraction are included
         results = [(l.clone(), u.clone())]
     
+        # Split the abstraction along each dimension
         for dim in dimensions:
             new_results = []
             for l_i, u_i in results:
-                # 使用 any() 來檢查是否有任何元素滿足條件
+                # 使用 any() 來檢查是否有任何元素在這個維度上跨越0
                 if (l_i[..., dim] < 0).any() and (u_i[..., dim] > 0).any():
                     # Split at 0
+
+                    # 創建新的下界,保持上界不變,將大於 0 的上界設為 0
                     l_new, u_new = l_i.clone(), u_i.clone()
                     u_new[..., dim] = torch.where(u_new[..., dim] > 0, torch.zeros_like(u_new[..., dim]), u_new[..., dim])
                     new_results.append((l_i, u_new))
-                
+
+                    # 創建新的上界,保持下界不變,將小於 0 的下界設為 0
                     l_new, u_new = l_i.clone(), u_i.clone()
                     l_new[..., dim] = torch.where(l_new[..., dim] < 0, torch.zeros_like(l_new[..., dim]), l_new[..., dim])
                     new_results.append((l_new, u_i))
                 else:
+                    # 如果這個區間在該維度上不跨越 0,保持不變
                     new_results.append((l_i, u_i))
+            # Update the result as the result of this dim
             results = new_results
     
         return results
