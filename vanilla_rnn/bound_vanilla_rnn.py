@@ -220,7 +220,6 @@ class RNN(nn.Module):
             return yL, yU
 
     def _compute_bounds(self, eps, p, v, X, Eps_idx, l_prev, u_prev, n, s, N, a_0, W_ax, W_aa, b_ax, b_aa, q):
-        # 問題出在這個function導致一堆nan還有statistics of l_eps:(min, mean, max, std) = (0, 0, 0, 0)
         # 初始化上下界
         yU = torch.zeros(N, s, device = X.device)  # [N,s]
         yL = torch.zeros(N, s, device = X.device)  # [N,s]
@@ -456,6 +455,7 @@ class RNN(nn.Module):
         return results
     
     def getLastLayerBound(self, eps, p, X = None, clearIntermediateVariables=False, Eps_idx = None):
+        # need to be checked
         #eps could be a real number, or a tensor of size N
         with torch.no_grad():
             if self.X is None and X is None:
@@ -480,6 +480,7 @@ class RNN(nn.Module):
         
     def getMaximumEps(self, p, true_label, target_label, eps0 = 1, max_iter = 100, 
                       X = None, acc = 0.001, gx0_trick = True, Eps_idx = None):
+        # 需要check
         #when u_eps-l_eps < acc, we stop searching
         with torch.no_grad():
             if self.X is None and X is None:
@@ -561,7 +562,7 @@ class RNN(nn.Module):
             while(search.sum()>0) and (iteration < max_iter):
                 #perform binary search
                 
-                print("search = {}".format(search))
+                print("search = {}".format(search)) # 全為True 有問題
                 if iteration > max_iter:
                     print('Have reached the maximum number of iterations')
                     break
@@ -598,8 +599,8 @@ class RNN(nn.Module):
                 search = (u_eps - l_eps) / ((u_eps+l_eps)/2+1e-8) > acc
                 print('----------------------------------------')
                 print(f'Iteration {iteration}:')
-                print(f'f_c - f_j = {lower if gx0_trick else true_lower - target_upper}')
-                print(f'u_eps - l_eps = {u_eps - l_eps}')
+                print(f'f_c - f_j = {lower if gx0_trick else true_lower - target_upper}') # lower, true_lower, target_upper有問題
+                print(f'u_eps - l_eps = {u_eps - l_eps}') # 沒有正確找到u_eps和l_eps
                 
                 iteration = iteration + 1
         return l_eps, u_eps
