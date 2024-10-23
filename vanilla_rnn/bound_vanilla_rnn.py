@@ -123,7 +123,7 @@ class RNN(nn.Module):
                 self.rnn = None
         return 0
         
-    def compute2sideBound(self, eps, p, v, X = None, Eps_idx = None, max_splits=3): # add max_splits
+    def compute2sideBound(self, eps, p, v, X = None, Eps_idx = None): # add max_splits
         """
         Compute two-sided bounds for a given input using a recurrent neural network.
         Parameters:
@@ -178,13 +178,17 @@ class RNN(nn.Module):
             # 在計算邊界之前應用 zeroSplit
             # v代表當前的timestep，位於第幾層hidden layer
             if self.activation == 'relu' and v > 1:
-                impact = torch.abs(self.u[v-1] - self.l[v-1]).sum(dim=0)
+                # impact = torch.abs(self.u[v-1] - self.l[v-1]).sum(dim=0) # 待確認
                 # 使用 any() 來檢查每個維度是否有任何元素需要分割，會是一個需要分割的list
-                dimensions_to_split = torch.argsort(impact, descending=True)[:max_splits]
+                # 識別所有跨越零的維度
+                zero_crossing = (self.l[v-1] < 0) & (self.u[v-1] > 0)
+                dimensions_to_split = torch.where(zero_crossing.any(dim=0))[0]
+                # dimensions_to_split = torch.argsort(impact, descending=True)[:max_splits]
                 abstractions = [(self.l[v-1], self.u[v-1])] # [N, s]
                 
                 for split_depth in range(1, len(dimensions_to_split) + 1):
-                    if len(abstractions) > 100: # 限制抽象的總數
+                    if len(abstractions) > 0: # 限制抽象的總數
+                        print(f"Warning: Reached maximum number of abstractions (100). Stopping further splits.")
                         break
                     #dim = dimensions_to_split.pop(0)
                     new_abstractions = []
@@ -364,8 +368,12 @@ class RNN(nn.Module):
                     kl, bl, ku, bu = get_bound.getConvenientGeneralActivationBound(
                                 self.l[k], self.u[k], self.activation)
                     
-                    bl = bl/kl
-                    bu = bu/ku
+                    # bl = bl/kl
+                    # bu = bu/ku
+                    # 在計算 bl/kl 和 bu/ku 時避免除以零
+                    epsilon = 1e-8
+                    bl = torch.where(kl != 0, bl / (kl + epsilon), bl)
+                    bu = torch.where(ku != 0, bu / (ku + epsilon), bu)
                     
                     self.kl[k] = kl  # [N, s]
                     self.ku[k] = ku  # [N, s]
@@ -376,11 +384,35 @@ class RNN(nn.Module):
                     beta_l = bl.unsqueeze(1).expand(-1, t, -1)  # [N, t, s]
                     beta_u = bu.unsqueeze(1).expand(-1, t, -1)  # [N, t, s]
                     ### 2. compute lambda^{<v-1>}, omega^{<v-1>}, Delta^{<v-1>} and Theta^{<v-1>}
+                    epsilon = 1e-8 # to avoid division by zero
                     I = (W_fa >= 0).float()  # [N, t, s]
                     lamida = I*alpha_u + (1-I)*alpha_l                  
                     omiga = I*alpha_l + (1-I)*alpha_u
-                    Delta = I*beta_u + (1-I)*beta_l  # [N, t, s], this is the transpose of the delta defined in the paper
+
+                    # 在計算 Delta 之後立即添加這些檢查
+                    print(f"beta_u range: [{beta_u.min().item()}, {beta_u.max().item()}]")
+                    print(f"beta_l range: [{beta_l.min().item()}, {beta_l.max().item()}]")
+
+                    Delta = I*beta_u + (1-I)*beta_l + epsilon  # [N, t, s], this is the transpose of the delta defined in the paper
+
+                    print(f"Delta initial range: [{Delta.min().item()}, {Delta.max().item()}]")
+
+                    # 清理 Delta 中的 NaN 和 Inf
+                    #Delta = torch.nan_to_num(Delta, nan=0.0, posinf=1e20, neginf=-1e20)
+
+                    # 使用 clamp 來限制 Delta 的範圍
+                    #Delta = torch.clamp(Delta, min=-1e20, max=1e20)
+
+                    print(f"Delta cleaned range: [{Delta.min().item()}, {Delta.max().item()}]")
+
                     Theta = I*beta_l + (1-I)*beta_u  # [N, t, s]
+
+                    # 對 Theta 進行與 Delta 相同的處理
+                    print(f"Theta initial range: [{Theta.min().item()}, {Theta.max().item()}]")
+                    #Theta = torch.nan_to_num(Theta, nan=0.0, posinf=1e20, neginf=-1e20)
+                    #Theta = torch.clamp(Theta, min=-1e20, max=1e20)
+                    #print(f"Theta cleaned range: [{Theta.min().item()}, {Theta.max().item()}]")
+
                     ### 3. clear l[k] and u[k] to release memory
                     self.l[k] = None
                     self.u[k] = None
@@ -394,13 +426,33 @@ class RNN(nn.Module):
                     alpha_u = self.ku[k].unsqueeze(1).expand(-1, t, -1)
                     beta_l = self.bl[k].unsqueeze(1).expand(-1, t, -1)  # [N, t, s]
                     beta_u = self.bu[k].unsqueeze(1).expand(-1, t, -1)  # [N, t, s]
+
+                    # 在計算 Delta 之後立即添加這些檢查
+                    print(f"beta_u range: [{beta_u.min().item()}, {beta_u.max().item()}]")
+                    print(f"beta_l range: [{beta_l.min().item()}, {beta_l.max().item()}]")
+
                     ### 2. compute lambda^{<k>}, omega^{<k>}, Delta^{<k>} and Theta^{<k>}
                     I = (torch.matmul(A,W_aa) >= 0).float()  # [N, t, s]
                     lamida = I*alpha_u + (1-I)*alpha_l                  
-                    Delta = I*beta_u + (1-I)*beta_l  # [N, s, s], this is the transpose of the delta defined in the paper
+                    Delta = I*beta_u + (1-I)*beta_l + epsilon  # [N, s, s], this is the transpose of the delta defined in the paper
+
+                    print(f"Delta initial range: [{Delta.min().item()}, {Delta.max().item()}]")
+                    # 清理 Delta 中的 NaN 和 Inf
+                    #Delta = torch.nan_to_num(Delta, nan=0.0, posinf=1e20, neginf=-1e20)
+                    # 使用 clamp 來限制 Delta 的範圍
+                    #Delta = torch.clamp(Delta, min=-1e20, max=1e20)
+                    print(f"Delta cleaned range: [{Delta.min().item()}, {Delta.max().item()}]")
+
                     I = (torch.matmul(Ou,W_aa) >= 0).float()  # [N, t, s]
                     omiga = I*alpha_l + (1-I)*alpha_u
                     Theta = I*beta_l + (1-I)*beta_u  # [N, s, s]
+
+                    # 對 Theta 進行與 Delta 相同的處理
+                    print(f"Theta initial range: [{Theta.min().item()}, {Theta.max().item()}]")
+                    #Theta = torch.nan_to_num(Theta, nan=0.0, posinf=1e20, neginf=-1e20)
+                    #Theta = torch.clamp(Theta, min=-1e20, max=1e20)
+                    print(f"Theta cleaned range: [{Theta.min().item()}, {Theta.max().item()}]")
+
                     ### 3. compute A^{<k>} and Ou^{<k>}
                     A = torch.matmul(A,W_aa) * lamida  # [N, s, s]
                     Ou = torch.matmul(Ou,W_aa) * omiga  # [N, s, s]
@@ -418,8 +470,95 @@ class RNN(nn.Module):
                 yU = yU + torch.matmul(A,torch.matmul(W_ax,X[:,k-1,:].view(N,n,1))).squeeze(2)  # A^ {<k>} W_ax x^{<k>}            
                 yL = yL + torch.matmul(Ou,torch.matmul(W_ax,X[:,k-1,:].view(N,n,1))).squeeze(2)  # Ou^ {<k>} W_ax x^{<k>}       
                 ## third term
-                yU = yU + torch.matmul(A,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(A*Delta).sum(2)  # A^ {<k>} (b_a + Delta^{<k>})
-                yL = yL + torch.matmul(Ou,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(Ou*Theta).sum(2)  # Ou^ {<k>} (b_a + Theta^{<k>})
+
+                # 轉換為 float64 以提高精度
+                # A = A.to(torch.float64)
+                # Delta = Delta.to(torch.float64)
+                # Ou = Ou.to(torch.float64)
+                # Theta = Theta.to(torch.float64)
+                # b_aa = b_aa.to(torch.float64)
+                # b_ax = b_ax.to(torch.float64)
+                # yU = yU.to(torch.float64)
+
+                # 打印出 A 和 Delta 的形狀
+                print(f"A shape: {A.shape}")
+                print(f"Delta shape: {Delta.shape}")
+                print(f"b_aa shape: {b_aa.shape}, dtype: {b_aa.dtype}")
+                print(f"b_ax shape: {b_ax.shape}, dtype: {b_ax.dtype}")
+
+                temp1 = torch.matmul(A, (b_aa + b_ax).view(N, s, 1)).squeeze(2) # Seperate the computation to avoid memory error
+                epsilon = 1e-20
+                A_abs = torch.clamp(torch.abs(A), min=epsilon, max=1e20)
+                Delta_abs = torch.clamp(torch.abs(Delta), min=epsilon, max=1e20)
+
+                print(f"A_abs range: [{A_abs.min().item()}, {A_abs.max().item()}]")
+                print(f"Delta_abs range: [{Delta_abs.min().item()}, {Delta_abs.max().item()}]")
+
+                log_A = torch.log(A_abs)
+                log_Delta = torch.log(Delta_abs)
+
+                print(f"log_A range: [{log_A.min().item()}, {log_A.max().item()}]")
+                print(f"log_Delta range: [{log_Delta.min().item()}, {log_Delta.max().item()}]")
+
+                log_prod = log_A + log_Delta
+                print(f"log_prod range: [{log_prod.min().item()}, {log_prod.max().item()}]")
+
+                max_val, _ = torch.max(log_prod, dim=2, keepdim=True)
+                print(f"max_val range: [{max_val.min().item()}, {max_val.max().item()}]")
+
+                log_diff = log_prod - max_val
+                print(f"log_diff range: [{log_diff.min().item()}, {log_diff.max().item()}]")
+
+                exp_diff = torch.exp(torch.clamp(log_diff, min=-20, max=20))
+                print(f"exp_diff range: [{exp_diff.min().item()}, {exp_diff.max().item()}]")
+
+                sum_exp = torch.sum(exp_diff, dim=2)
+                print(f"sum_exp range: [{sum_exp.min().item()}, {sum_exp.max().item()}]")
+
+                log_sum = torch.log(sum_exp) + max_val.squeeze(2)
+                print(f"log_sum range: [{log_sum.min().item()}, {log_sum.max().item()}]")
+
+                sign = torch.sign(A) * torch.sign(Delta)
+                sign_prod = torch.prod(sign, dim=2)
+
+                temp2 = sign_prod * torch.exp(torch.clamp(log_sum, min=-20, max=20))
+
+                # 檢查結果
+                print(f"temp2 shape: {temp2.shape}, max: {temp2.max().item()}, min: {temp2.min().item()}, mean: {temp2.mean().item()}")
+
+                if torch.isinf(temp2).any() or torch.isnan(temp2).any():
+                    print("Warning: temp2 contains inf or nan values")
+                #temp2 = (A*Delta).sum(2)
+                yU = yU + temp1 + temp2
+                #yU = yU + torch.matmul(A,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(A*Delta).sum(2)  # A^ {<k>} (b_a + Delta^{<k>})
+
+                temp1_L = torch.matmul(Ou, (b_aa + b_ax).view(N, s, 1)).squeeze(2)
+                Ou_abs = torch.clamp(torch.abs(Ou), min=epsilon, max=1e20)
+                Theta_abs = torch.clamp(torch.abs(Theta), min=epsilon, max=1e20)
+
+                log_Ou = torch.log(Ou_abs)
+                log_Theta = torch.log(Theta_abs)
+
+                log_prod_L = log_Ou + log_Theta
+                log_prod_L = log_Ou + log_Theta
+                max_val_L, _ = torch.max(log_prod_L, dim=2, keepdim=True)
+                log_diff_L = log_prod_L - max_val_L
+                exp_diff_L = torch.exp(torch.clamp(log_diff_L, min=-20, max=20))
+                sum_exp_L = torch.sum(exp_diff_L, dim=2)
+                log_sum_L = torch.log(sum_exp_L) + max_val_L.squeeze(2)
+
+                sign_L = torch.sign(Ou) * torch.sign(Theta)
+                sign_prod_L = torch.prod(sign_L, dim=2)
+
+                temp2_L = sign_prod_L * torch.exp(torch.clamp(log_sum_L, min=-20, max=20))
+
+                print(f"temp2_L shape: {temp2_L.shape}, max: {temp2_L.max().item()}, min: {temp2_L.min().item()}, mean: {temp2_L.mean().item()}")
+
+                if torch.isinf(temp2_L).any() or torch.isnan(temp2_L).any():
+                    print("Warning: temp2_L contains inf or nan values")
+
+                yL = yL + temp1_L + temp2_L
+                #yL = yL + torch.matmul(Ou,(b_aa+b_ax).view(N,s,1)).squeeze(2)+(Ou*Theta).sum(2)  # Ou^ {<k>} (b_a + Theta^{<k>})
             # compute A^{<0>}
             A = torch.matmul(A,W_aa)  # (A^ {<1>} W_aa) * lambda^{<0>}
             Ou = torch.matmul(Ou,W_aa)  # (Ou^ {<1>} W_aa) * omega^{<0>}
@@ -445,12 +584,12 @@ class RNN(nn.Module):
                 if (l_i[..., dim] < 0).any() and (u_i[..., dim] > 0).any():
                     # Split at 0
 
-                    # 創建新的下界,保持上界不變,將大於 0 的上界設為 0
+                    # 創建新的下界,保持下界不變,將大於 0 的上界設為 0
                     l_new, u_new = l_i.clone(), u_i.clone()
                     u_new[..., dim] = torch.where(u_new[..., dim] > 0, torch.zeros_like(u_new[..., dim]), u_new[..., dim])
                     new_results.append((l_i, u_new))
 
-                    # 創建新的上界,保持下界不變,將小於 0 的下界設為 0
+                    # 創建新的上界,保持上界不變,將小於 0 的下界設為 0
                     l_new, u_new = l_i.clone(), u_i.clone()
                     l_new[..., dim] = torch.where(l_new[..., dim] < 0, torch.zeros_like(l_new[..., dim]), l_new[..., dim])
                     new_results.append((l_new, u_i))
@@ -477,17 +616,44 @@ class RNN(nn.Module):
             for k in range(1,self.time_step+1):
                 # k from 1 to self.time_step
                 yL,yU = self.compute2sideBound(eps, p, k, X=X[:,0:k,:], Eps_idx = Eps_idx)
+
+                # 檢查NaN
+                if torch.isnan(yL).any() or torch.isnan(yU).any():
+                    print(f"NaN detected in step {k}")
+                    print(f"yL NaN count: {torch.isnan(yL).sum()}")
+                    print(f"yU NaN count: {torch.isnan(yU).sum()}")
+
+                # 數值穩定性
+                yL = torch.clamp(yL, min=-1e6, max=1e6)
+                yU = torch.clamp(yU, min=-1e6, max=1e6)
+
                 # 確保 yL <= yU
                 yL, yU = torch.min(yL, yU), torch.max(yL, yU)
                 self.l[k], self.u[k] = yL, yU
-            yL,yU = self.computeLast2sideBound(eps, p, self.time_step+1, X, Eps_idx = Eps_idx)    
+            yL,yU = self.computeLast2sideBound(eps, p, self.time_step+1, X, Eps_idx = Eps_idx)  
                 #in this loop, self.u, l, Il, WD are reused
             if clearIntermediateVariables:
                 self.clear_intermediate_variables()
         return yL, yU
         
     def getMaximumEps(self, p, true_label, target_label, eps0 = 1, max_iter = 100, 
-                      X = None, acc = 0.001, gx0_trick = True, Eps_idx = None):
+                      X = None, acc = 0.001, gx0_trick = False, Eps_idx = None):
+        """
+        Finds the maximum epsilon value for a given set of parameters.
+        Args:
+            p (float): The value of p.
+            true_label (int): The true label.
+            target_label (int): The target label.
+            eps0 (float, optional): The initial value of epsilon. Defaults to 1.
+            max_iter (int, optional): The maximum number of iterations. Defaults to 100.
+            X (torch.Tensor, optional): The input data. Defaults to None.
+            acc (float, optional): The accuracy threshold. Defaults to 0.001. = tao
+            gx0_trick (bool, optional): Whether to use the gx0 trick. Defaults to True.
+            Eps_idx (torch.Tensor, optional): The epsilon index. Defaults to None.
+        Returns:
+            torch.Tensor: The lower bound of epsilon.
+            torch.Tensor: The upper bound of epsilon.
+        """
         # 需要check
         #when u_eps-l_eps < acc, we stop searching
         with torch.no_grad():
@@ -519,7 +685,7 @@ class RNN(nn.Module):
                                              clearIntermediateVariables=True, Eps_idx = Eps_idx)
             if gx0_trick: 
                  lower = yL[idx,idx]
-                 increase_u_eps = lower > 0 
+                 increase_u_eps = lower > 0 # Boolean tensor of size N, label the sample need to increase u_eps, True shows continue, False shows stop
                  print("initial batch f_c^L - f_j^U = {}".format(lower))
                  print("increase_u_eps = {}".format(increase_u_eps))
             else:
@@ -532,18 +698,49 @@ class RNN(nn.Module):
                  print("initial batch f_c^L - f_j^U = {}".format(true_lower - target_upper))
                  
             ## 1. Find initial upper and lower bound for binary search
-            while (increase_u_eps.sum()>0):
+            # Add iterations limitation
+            max_while_iter = 5
+            while_iter = 0
+            prev_sum = increase_u_eps.sum()
+            no_change_count = 0
+
+            while (increase_u_eps.sum()>0) and (while_iter < max_while_iter):
                 #find true and nontrivial lower bound and upper bound of eps
+                while_iter += 1
                 num = increase_u_eps.sum()
                 l_eps[increase_u_eps] = u_eps[increase_u_eps]
                 u_eps[increase_u_eps ] = u_eps[increase_u_eps ] * 2
+
+                # 檢查u_eps的變化
+                if torch.allclose(u_eps, l_eps, rtol=1e-5, atol=1e-5):
+                    print("u_eps and l_eps coverged")
+                    break
                 yL, yU = self.getLastLayerBound(u_eps[increase_u_eps], p, 
                             X=X[increase_u_eps,:],clearIntermediateVariables=True, Eps_idx = Eps_idx)
                 #yL and yU only for those equal to 1 in increase_u_eps
                 #they are of size (num,_)
                 if gx0_trick:
-                    lower = yL[torch.arange(num),idx[increase_u_eps]]
-                    increase_u_eps[increase_u_eps] = lower > 0
+
+                    # 確保所有的索引都在有效範圍內
+                    valid_mask = idx < yL.shape[0]
+                    valid_idx = idx[valid_mask]
+                    valid_increase_u_eps = increase_u_eps[valid_mask]
+
+                    # 使用有效的索引來獲取 lower 值
+                    lower = yL[torch.arange(len(valid_idx)), valid_idx]
+
+                    # 更新 increase_u_eps，但只更新有效的部分
+                    new_increase_u_eps = increase_u_eps.clone()
+                    new_increase_u_eps[valid_mask] = valid_increase_u_eps & (lower > 0)
+
+                    # 更新 increase_u_eps
+                    increase_u_eps = new_increase_u_eps
+
+                    print(f"Updated increase_u_eps shape: {increase_u_eps.shape}")
+                    print(f"Number of True values in increase_u_eps: {increase_u_eps.sum().item()}")
+
+                    # lower = yL[torch.arange(num),idx[increase_u_eps]]
+                    # increase_u_eps = increase_u_eps & (lower > 0) # 維度不匹配
                     # temp = lower > 0
                     # print("f_c - f_j = {}".format(lower))
                 else:
@@ -556,6 +753,21 @@ class RNN(nn.Module):
                 # new_increase_u_eps = increase_u_eps.clone()
                 # new_increase_u_eps[increase_u_eps] = temp
                 # increase_u_eps = new_increase_u_eps
+                # 檢查 increase_u_eps 的變化
+                current_sum = increase_u_eps.sum()
+                if current_sum == prev_sum:
+                    no_change_count += 1
+                    if no_change_count > 5: # 如果連續5次沒有變化，就退出循環
+                        print('increase_u_eps not changing for 5 iterations')
+                        break
+                else:
+                    no_change_count = 0
+                prev_sum = current_sum
+
+                print(f"Iteration {while_iter}, increase_u_eps sum: {current_sum}")
+            
+            if while_iter >= max_while_iter:
+                print("Reached maximum number of iterations in initial bound finding")
                 
             print('Finished finding upper and lower bound')
             print('The upper bound we found is \n', u_eps)
@@ -570,7 +782,7 @@ class RNN(nn.Module):
             while(search.sum()>0) and (iteration < max_iter):
                 #perform binary search
                 
-                print("search = {}".format(search)) # 全為True 有問題
+                print("search = {}".format(search)) # 全為True時代表有問題，沒有找到正確解
                 if iteration > max_iter:
                     print('Have reached the maximum number of iterations')
                     break
@@ -607,8 +819,8 @@ class RNN(nn.Module):
                 search = (u_eps - l_eps) / ((u_eps+l_eps)/2+1e-8) > acc
                 print('----------------------------------------')
                 print(f'Iteration {iteration}:')
-                print(f'f_c - f_j = {lower if gx0_trick else true_lower - target_upper}') # lower, true_lower, target_upper有問題
-                print(f'u_eps - l_eps = {u_eps - l_eps}') # 沒有正確找到u_eps和l_eps
+                print(f'f_c - f_j = {lower if gx0_trick else true_lower - target_upper}')
+                print(f'u_eps - l_eps = {u_eps - l_eps}')
                 
                 iteration = iteration + 1
         return l_eps, u_eps
